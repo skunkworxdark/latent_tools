@@ -82,7 +82,7 @@ BLEND_MODES = Literal[
 
 @invocation(
     "latent_combine",
-    title="Combine Latents",
+    title="Latent Combine",
     tags=["latents", "combine"],
     category="latents",
     version="0.3.0",
