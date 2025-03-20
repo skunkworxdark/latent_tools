@@ -1,9 +1,9 @@
 # `latent_tools` for InvokeAI (v4.0+)
-Discord Link :- [latent_tools](https://discord.com/channels/1020123559063990373/1216759622007001139)
+Discord Link :- [latent_tools](https://discord.com/channels/1020123559063990373/1352361385060860025)
 
 A set of InvokeAI nodes to manipulate and visualize latents in Invoke AI workflows.
 
-Note: These are currently very experimental, especially the generic versions.
+Note: These are currently very experimental.
 
 - `Latent Average` - adds both latents together and divides by 2
 - `Latent Combine` - Many more combination methods. Not sure how useful these are but might give some interesting results.
