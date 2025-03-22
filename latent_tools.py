@@ -4,8 +4,11 @@ import io
 import math
 from typing import Literal
 
+import matplotlib
 import numpy as np
 import torch
+
+matplotlib.use("Agg")  # Use the Agg backend to prevent popup
 from matplotlib import pyplot as plt
 from PIL import Image
 
