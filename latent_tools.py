@@ -10,7 +10,9 @@ import torch
 
 matplotlib.use("Agg")  # Use the Agg backend to prevent popup
 from matplotlib import pyplot as plt
+from matplotlib import ticker
 from PIL import Image
+from scipy import stats
 
 from invokeai.invocation_api import (
     BaseInvocation,
@@ -88,7 +90,7 @@ BLEND_MODES = Literal[
     title="Latent Combine",
     tags=["latents", "combine"],
     category="latents",
-    version="0.3.0",
+    version="1.0.0",
 )
 class LatentCombineInvocation(BaseInvocation):
     """Combines two latent tensors using various methods, including frequency domain blending."""
@@ -249,23 +251,27 @@ class LatentCombineInvocation(BaseInvocation):
 
 
 @invocation(
-    "latent_histogram",
-    title="Latent histograms",
+    "latent_plot",
+    title="Latent Plot",
     tags=["latents", "image", "flux"],
     category="latents",
     version="1.0.0",
 )
-class LatentHistogramsInvocation(BaseInvocation, WithMetadata, WithBoard):
+class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
     latent: LatentsField = InputField(
         default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
-    hist_bins: int = InputField(default=100, description="Number of bins for the histogram")
-    cell_size_multiplier: int = InputField(default=3, description="size multiplier for grid cells")
+    """Generates plots from latent channels and display in a grid."""
+    cell_x_multiplier: float = InputField(default=4.0, description="x size multiplier for grid cells")
+    cell_y_multiplier: float = InputField(default=3.0, description="y size multiplier for grid cells")
+    histogram_plot: bool = InputField(default=True, description="Plot histogram")
+    histogram_bins: int = InputField(default=100, description="Number of bins for the histogram")
+    box_plot: bool = InputField(default=True, description="Plot box and whisker")
+    stats_plot: bool = InputField(default=True, description="Plot distribution data (mean, std, mode, min, max, dtype)")
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
-        """Generates histograms from latent channels and display in a grid."""
         latent = context.tensors.load(self.latent.latents_name)
 
         if len(latent.shape) != 4:
@@ -275,24 +281,72 @@ class LatentHistogramsInvocation(BaseInvocation, WithMetadata, WithBoard):
         num_channels = channels.shape[0]
         grid_size = int(math.ceil(math.sqrt(num_channels)))
 
-        fig_hist, axes_hist = plt.subplots(
-            grid_size, grid_size, figsize=(grid_size * self.cell_size_multiplier, grid_size * self.cell_size_multiplier)
+        fig_plot, axes_plot = plt.subplots(
+            grid_size, grid_size, figsize=(grid_size * self.cell_x_multiplier, grid_size * self.cell_y_multiplier)
         )
-        axes_hist = axes_hist.flatten()
+        axes_plot = axes_plot.flatten()
 
         for i, channel in enumerate(channels):
             if i < num_channels:
-                axes_hist[i].hist(channel.flatten(), bins=self.hist_bins)
-                axes_hist[i].set_title(f"{i}")
-            else:
-                fig_hist.delaxes(axes_hist[i])
+                axes_plot[i].set_title(f"{i}")
+                channel_flat = channel.flatten()
 
-        plt.tight_layout()
+                if self.histogram_plot:
+                    n, bins, patches = axes_plot[i].hist(channel_flat, bins=self.histogram_bins, alpha=0.6)
+                else:
+                    n = [0]  # If no histogram, set n to [0] to avoid errors
+
+                if self.box_plot:
+                    box_data = axes_plot[i].boxplot(
+                        channel_flat,
+                        vert=False,
+                        positions=[np.max(n) * 0.6 if self.histogram_plot else 0],  # Adjust position based on histogram
+                        widths=np.max(n) * 0.08 if self.histogram_plot else 0.08,  # Adjust width based on histogram
+                        patch_artist=True,
+                        showfliers=False,  # Hide outliers
+                        # whis=3.0,  # Adjust whisker length (increase to 2.0)
+                    )
+
+                    for box in box_data["boxes"]:
+                        box.set_facecolor("lightblue")
+
+                if self.stats_plot:
+                    min_val = np.min(channel_flat)
+                    max_val = np.max(channel_flat)
+                    mean = np.mean(channel_flat)
+                    median = np.median(channel_flat)
+                    std = np.std(channel_flat)
+                    mode = stats.mode(channel_flat, keepdims=True).mode[0]
+                    axes_plot[i].annotate(
+                        f"min: {min_val:.3f}\nmax: {max_val:.3f}\nmean: {mean:.3f}\nmedian: {median:.3f}\nmode: {mode:.3f}\nstd: {std:.3f}",
+                        xy=(0.05, 0.95),
+                        xycoords="axes fraction",
+                        verticalalignment="top",
+                        fontsize=8,
+                    )
+
+                    data_type = latent[:, i, :, :].dtype
+                    axes_plot[i].annotate(
+                        f"type: {data_type}",
+                        xy=(0.55, 0.95),
+                        xycoords="axes fraction",
+                        verticalalignment="top",
+                        fontsize=8,
+                    )
+
+                # Force y-axis to show integer ticks
+                max_y = int(max(n))  # Get the max y-value (histogram height)
+                axes_plot[i].yaxis.set_ticks(np.linspace(0, max_y, min(6, max_y + 1)))  # Set up to 6 ticks
+                axes_plot[i].yaxis.set_major_formatter(ticker.FormatStrFormatter("%d"))
+            else:
+                fig_plot.delaxes(axes_plot[i])
+
+        plt.tight_layout()  # pad=2.0)
         buffer = io.BytesIO()
-        fig_hist.savefig(buffer, format="png")
+        fig_plot.savefig(buffer, format="png")
         buffer.seek(0)
         hist_image = Image.open(buffer).convert("RGB")
-        plt.close(fig_hist)
+        plt.close(fig_plot)
 
         image_dto = context.images.save(image=hist_image)
         return ImageOutput.build(image_dto)
@@ -350,3 +404,96 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
         grid_image_rgb = grid_image.convert("RGB")
         image_dto = context.images.save(image=grid_image_rgb)
         return ImageOutput.build(image_dto)
+
+
+CONVERT_DTYPE_OPTIONS = Literal["float32", "float16", "bfloat16"]
+
+
+@invocation(
+    "latent_dtype_convert",
+    title="Latent Dtype Convert",
+    tags=["latents", "dtype", "convert"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentDtypeConvertInvocation(BaseInvocation):
+    """Converts the dtype of a latent tensor."""
+
+    latent: LatentsField = InputField(
+        default=None,
+        description=FieldDescriptions.latents,
+        input=Input.Connection,
+    )
+    dtype: CONVERT_DTYPE_OPTIONS = InputField(
+        default="bfloat16",
+        description="The target dtype for the latent tensor.",
+    )
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        """Converts the dtype of a latent tensor."""
+        latent = context.tensors.load(self.latent.latents_name)
+
+        target_dtype = getattr(torch, self.dtype)
+        converted_latent = latent.to(target_dtype)
+
+        name = context.tensors.save(tensor=converted_latent)
+        return LatentsOutput.build(latents_name=name, latents=converted_latent, seed=None)
+
+
+@invocation(
+    "latent_modify_channels",
+    title="Latent Modify Channels",
+    tags=["latents", "modify", "channels"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentModifyChannelsInvocation(BaseInvocation):
+    """Modifies selected channels of a latent tensor using scale and shift."""
+
+    latent: LatentsField = InputField(
+        default=None,
+        description=FieldDescriptions.latents,
+        input=Input.Connection,
+    )
+    channels: str = InputField(
+        default="all",
+        description="Comma-separated list of channel indices to modify. Use 'all' for all channels.",
+    )
+    scale: float = InputField(
+        default=1.0,
+        description="Scale factor to apply to the selected channels.",
+    )
+    shift: float = InputField(
+        default=0.0,
+        description="Shift value to add to the selected channels.",
+    )
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        """Modifies selected channels of a latent tensor."""
+        latent = context.tensors.load(self.latent.latents_name)
+
+        if len(latent.shape) != 4:
+            raise ValueError("Latent tensor must have 4 dimensions (batch, channels, height, width).")
+
+        num_channels = latent.shape[1]
+
+        if self.channels.lower() == "all":
+            channel_indices = list(range(num_channels))
+        else:
+            try:
+                channel_indices = [int(c.strip()) for c in self.channels.split(",")]
+            except ValueError:
+                raise ValueError("Invalid channel list. Please provide a comma-separated list of integers or 'all'.")
+
+            # Validate channel indices
+            invalid_indices = [c for c in channel_indices if not (0 <= c < num_channels)]
+            if invalid_indices:
+                raise ValueError(f"Invalid channel indices: {invalid_indices}. Valid range: 0 to {num_channels - 1}.")
+
+        modified_latent = latent.clone()  # Create a copy to avoid modifying the original
+
+        for channel_index in channel_indices:
+            modified_latent[:, channel_index, :, :] = modified_latent[:, channel_index, :, :] * self.scale + self.shift
+
+        name = context.tensors.save(tensor=modified_latent)
+        return LatentsOutput.build(latents_name=name, latents=modified_latent, seed=None)
