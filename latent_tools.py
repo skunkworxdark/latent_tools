@@ -255,7 +255,7 @@ class LatentCombineInvocation(BaseInvocation):
     title="Latent Plot",
     tags=["latents", "image", "flux"],
     category="latents",
-    version="1.0.0",
+    version="1.2.0",
 )
 class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
     latent: LatentsField = InputField(
@@ -267,7 +267,8 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
     cell_x_multiplier: float = InputField(default=4.0, description="x size multiplier for grid cells")
     cell_y_multiplier: float = InputField(default=3.0, description="y size multiplier for grid cells")
     histogram_plot: bool = InputField(default=True, description="Plot histogram")
-    histogram_bins: int = InputField(default=100, description="Number of bins for the histogram")
+    histogram_bins: int = InputField(default=200, description="Number of bins for the histogram")
+    histogram_log_scale: bool = InputField(default=False, description="Use log scale for histogram y-axis")
     box_plot: bool = InputField(default=True, description="Plot box and whisker")
     stats_plot: bool = InputField(default=True, description="Plot distribution data (mean, std, mode, min, max, dtype)")
 
@@ -293,19 +294,37 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
 
                 if self.histogram_plot:
                     n, bins, patches = axes_plot[i].hist(channel_flat, bins=self.histogram_bins, alpha=0.6)
+                    if self.histogram_log_scale:
+                        axes_plot[i].set_yscale("log")
                 else:
                     n = [0]  # If no histogram, set n to [0] to avoid errors
 
                 if self.box_plot:
+                    # Determine boxplot position and width based on histogram and log scale
+                    if self.histogram_plot:
+                        if self.histogram_log_scale:
+                            position = max(n) * 0.05
+                            width = max(n) * 0.04
+                        else:
+                            position = max(n) * 0.6
+                            width = max(n) * 0.08
+                    else:
+                        position = 0.1  # Arbitrary position without histogram
+                        width = 0.08  # Arbitrary width without histogram
+
                     box_data = axes_plot[i].boxplot(
                         channel_flat,
                         vert=False,
-                        positions=[np.max(n) * 0.6 if self.histogram_plot else 0],  # Adjust position based on histogram
-                        widths=np.max(n) * 0.08 if self.histogram_plot else 0.08,  # Adjust width based on histogram
+                        positions=[position],  # [np.max(n) * 0.6 if self.histogram_plot else 0],  # Adjust position based on histogram
+                        widths=width,  # np.max(n) * 0.08 if self.histogram_plot else 0.08,  # Adjust width based on histogram
                         patch_artist=True,
                         showfliers=False,  # Hide outliers
                         # whis=3.0,  # Adjust whisker length (increase to 2.0)
                     )
+
+                    for item in ["boxes", "whiskers", "caps", "medians"]:
+                        for element in box_data[item]:
+                            plt.setp(element, alpha=0.5)
 
                     for box in box_data["boxes"]:
                         box.set_facecolor("lightblue")
@@ -335,8 +354,15 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
                     )
 
                 # Force y-axis to show integer ticks
-                max_y = int(max(n))  # Get the max y-value (histogram height)
-                axes_plot[i].yaxis.set_ticks(np.linspace(0, max_y, min(6, max_y + 1)))  # Set up to 6 ticks
+                # max_y = int(max(n))  # Get the max y-value (histogram height)
+                # axes_plot[i].yaxis.set_ticks(np.linspace(0, max_y, min(6, max_y + 1)))  # Set up to 6 ticks
+                if self.histogram_log_scale:
+                    axes_plot[i].yaxis.set_major_locator(ticker.LogLocator(numticks=4))
+                    axes_plot[i].yaxis.set_major_formatter(ticker.LogFormatter())
+                else:
+                    axes_plot[i].yaxis.set_major_locator(ticker.LinearLocator(numticks=4))
+                    # max_y = int(max(n))  # Get the max y-value (histogram height)
+                    # axes_plot[i].yaxis.set_ticks(np.linspace(0, max_y, min(6, max_y + 1)))  # Set up to 6 ticks
                 axes_plot[i].yaxis.set_major_formatter(ticker.FormatStrFormatter("%d"))
             else:
                 fig_plot.delaxes(axes_plot[i])
