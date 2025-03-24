@@ -2,7 +2,7 @@
 
 import io
 import math
-from typing import Literal
+from typing import List, Literal
 
 import matplotlib
 import numpy as np
@@ -255,7 +255,7 @@ class LatentCombineInvocation(BaseInvocation):
     title="Latent Plot",
     tags=["latents", "image", "flux"],
     category="latents",
-    version="1.2.0",
+    version="1.3.0",
 )
 class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
     latent: LatentsField = InputField(
@@ -267,10 +267,11 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
     cell_x_multiplier: float = InputField(default=4.0, description="x size multiplier for grid cells")
     cell_y_multiplier: float = InputField(default=3.0, description="y size multiplier for grid cells")
     histogram_plot: bool = InputField(default=True, description="Plot histogram")
-    histogram_bins: int = InputField(default=200, description="Number of bins for the histogram")
+    histogram_bins: int = InputField(default=256, description="Number of bins for the histogram")
     histogram_log_scale: bool = InputField(default=False, description="Use log scale for histogram y-axis")
     box_plot: bool = InputField(default=True, description="Plot box and whisker")
     stats_plot: bool = InputField(default=True, description="Plot distribution data (mean, std, mode, min, max, dtype)")
+    title: str = InputField(default="Latent Channel Plots", description="Title to display on the image")
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
         latent = context.tensors.load(self.latent.latents_name)
@@ -367,7 +368,8 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
             else:
                 fig_plot.delaxes(axes_plot[i])
 
-        plt.tight_layout()  # pad=2.0)
+        fig_plot.suptitle(self.title, fontsize=16)
+        plt.tight_layout()
         buffer = io.BytesIO()
         fig_plot.savefig(buffer, format="png")
         buffer.seek(0)
@@ -523,3 +525,341 @@ class LatentModifyChannelsInvocation(BaseInvocation):
 
         name = context.tensors.save(tensor=modified_latent)
         return LatentsOutput.build(latents_name=name, latents=modified_latent, seed=None)
+
+
+MATCHING_METHODS = Literal["histogram", "std_dev", "mean", "std_dev+mean", "cdf", "moment", "range"]
+
+
+@invocation(
+    "latent_match",
+    title="Latent Match",
+    tags=["latents", "match"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentMatchInvocation(BaseInvocation):
+    """
+    Matches the distribution of one latent tensor to that of another,
+    using either histogram matching or standard deviation matching.
+    """
+
+    input_latent: LatentsField = InputField(
+        default=None,
+        description="The input latent tensor to be matched.",
+        input=Input.Connection,
+    )
+    reference_latent: LatentsField = InputField(
+        default=None,
+        description="The reference latent tensor to match against.",
+        input=Input.Connection,
+    )
+    method: MATCHING_METHODS = InputField(
+        default="histogram",
+        description="The matching method to use.",
+    )
+    channels: str = InputField(
+        default="all",
+        description="Comma-separated list of channel indices to match. Use 'all' for all channels.",
+    )
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        """
+        Matches the distribution of the input latent to the reference latent
+        using the specified method.
+        """
+        input_latent = context.tensors.load(self.input_latent.latents_name)
+        reference_latent = context.tensors.load(self.reference_latent.latents_name)
+
+        assert input_latent.shape == reference_latent.shape, "Input and reference latents must have the same shape."
+
+        num_channels = input_latent.shape[1]
+
+        if self.channels.lower() == "all":
+            channel_indices = list(range(num_channels))
+        else:
+            try:
+                channel_indices = [int(c.strip()) for c in self.channels.split(",")]
+            except ValueError:
+                raise ValueError("Invalid channel list. Please provide a comma-separated list of integers or 'all'.")
+
+            # Validate channel indices
+            invalid_indices = [c for c in channel_indices if not (0 <= c < num_channels)]
+            if invalid_indices:
+                raise ValueError(f"Invalid channel indices: {invalid_indices}. Valid range: 0 to {num_channels - 1}.")
+
+            # Remove duplicate channels.
+            channel_indices = list(set(channel_indices))
+
+        if self.method == "histogram":
+            matched_latent = self._histogram_match(input_latent, reference_latent, channel_indices)
+        elif self.method == "std_dev":
+            matched_latent = self._match_std_dev(input_latent, reference_latent, channel_indices)
+        elif self.method == "mean":
+            matched_latent = self._match_mean(input_latent, reference_latent, channel_indices)
+        elif self.method == "std_dev+mean":
+            matched_latent = self._match_std_dev_mean(input_latent, reference_latent, channel_indices)
+        elif self.method == "cdf":
+            matched_latent = self._match_cdf(input_latent, reference_latent, channel_indices)
+        elif self.method == "moment":
+            matched_latent = self._match_moment(input_latent, reference_latent, channel_indices)
+        elif self.method == "range":
+            matched_latent = self._match_range(input_latent, reference_latent, channel_indices)
+        else:
+            raise ValueError(f"Invalid matching method: {self.method}")
+
+        name = context.tensors.save(tensor=matched_latent)
+        return LatentsOutput.build(latents_name=name, latents=matched_latent, seed=None)
+
+    def _histogram_match(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+        """
+        Matches the histogram of the input latent to the reference latent.
+
+        Args:
+            input_latent: The input latent tensor.
+            reference_latent: The reference latent tensor.
+
+        Returns:
+            A new latent tensor with the histogram of the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over channels
+            input_channel = input_latent[:, i, :, :].cpu().float().numpy().flatten()
+            reference_channel = reference_latent[:, i, :, :].cpu().float().numpy().flatten()
+
+            # Compute histograms
+            input_hist, input_bins = np.histogram(input_channel, bins=256, density=True)
+            reference_hist, reference_bins = np.histogram(reference_channel, bins=256, density=True)
+
+            # Compute cumulative distribution functions (CDFs)
+            input_cdf = np.cumsum(input_hist)
+            reference_cdf = np.cumsum(reference_hist)
+
+            # Normalize CDFs
+            input_cdf = input_cdf / input_cdf[-1]
+            reference_cdf = reference_cdf / reference_cdf[-1]
+
+            # Create interpolation function
+            interp_values = np.interp(input_cdf, reference_cdf, reference_bins[:-1])
+
+            # Apply the interpolation to the input channel
+            matched_channel_values = np.interp(input_channel, input_bins[:-1], interp_values)
+            matched_channel_tensor = (
+                torch.from_numpy(matched_channel_values.reshape(input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]))
+                .float()
+                .to(dtype=input_latent.dtype, device=input_latent.device)
+            )
+            matched_latent[:, i, :, :] = matched_channel_tensor
+
+        return matched_latent
+
+    def _match_std_dev(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+        """
+        Matches the standard deviation of the input latent to the reference latent.
+
+        Args:
+            input_latent: The input latent tensor.
+            reference_latent: The reference latent tensor.
+
+        Returns:
+            A new latent tensor with the standard deviation of the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over channels
+            input_channel = input_latent[:, i, :, :]
+            reference_channel = reference_latent[:, i, :, :]
+
+            input_std = torch.std(input_channel)
+            reference_std = torch.std(reference_channel)
+
+            # Scale the input channel to match the reference standard deviation
+            if input_std != 0:
+                scaled_channel = (input_channel / input_std) * reference_std
+            else:
+                scaled_channel = torch.zeros_like(input_channel)
+            matched_latent[:, i, :, :] = scaled_channel
+
+        return matched_latent
+
+    def _match_mean(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+        """
+        Matches the mean of the input latent to the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over specified channels
+            input_channel = input_latent[:, i, :, :]
+            reference_channel = reference_latent[:, i, :, :]
+
+            input_mean = torch.mean(input_channel)
+            reference_mean = torch.mean(reference_channel)
+
+            # Shift the input channel to match the reference mean
+            shifted_channel = input_channel - input_mean + reference_mean
+            matched_latent[:, i, :, :] = shifted_channel
+
+        return matched_latent
+
+    def _match_std_dev_mean(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+        """
+        Matches the standard deviation and mean of the input latent to the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over specified channels
+            input_channel = input_latent[:, i, :, :]
+            reference_channel = reference_latent[:, i, :, :]
+
+            input_std = torch.std(input_channel)
+            reference_std = torch.std(reference_channel)
+            reference_mean = torch.mean(reference_channel)
+
+            # Scale the input channel to match the reference standard deviation
+            if input_std != 0:
+                scaled_channel = (input_channel / input_std) * reference_std
+            else:
+                scaled_channel = torch.zeros_like(input_channel)
+
+            # Shift the scaled channel to match the reference mean
+            shifted_channel = scaled_channel - torch.mean(scaled_channel) + reference_mean
+            matched_latent[:, i, :, :] = shifted_channel
+
+        return matched_latent
+
+    def _match_cdf(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+        """
+        Matches the cumulative distribution function (CDF) of the input latent to the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over specified channels
+            input_channel = input_latent[:, i, :, :].cpu().float().numpy().flatten()
+            reference_channel = reference_latent[:, i, :, :].cpu().float().numpy().flatten()
+
+            # Compute CDFs
+            input_sorted = np.sort(input_channel)
+            reference_sorted = np.sort(reference_channel)
+
+            input_cdf = np.arange(len(input_sorted)) / (len(input_sorted) - 1)
+            reference_cdf = np.arange(len(reference_sorted)) / (len(reference_sorted) - 1)
+
+            # Create interpolation function
+            interp_values = np.interp(input_cdf, reference_cdf, reference_sorted)
+
+            # Apply the interpolation to the input channel
+            matched_channel_values = np.interp(input_channel, input_sorted, interp_values)
+            matched_channel_tensor = (
+                torch.from_numpy(matched_channel_values.reshape(input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]))
+                .float()
+                .to(dtype=input_latent.dtype, device=input_latent.device)
+            )
+            matched_latent[:, i, :, :] = matched_channel_tensor
+
+        return matched_latent
+
+    def _match_moment(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+        """
+        Matches the mean, standard deviation, skewness, and kurtosis of the input latent to the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over specified channels
+            input_channel = input_latent[:, i, :, :].cpu().float().numpy().flatten()
+            reference_channel = reference_latent[:, i, :, :].cpu().float().numpy().flatten()
+
+            input_mean = np.mean(input_channel)
+            reference_mean = np.mean(reference_channel)
+            input_std = np.std(input_channel)
+            reference_std = np.std(reference_channel)
+            input_skew = stats.skew(input_channel)
+            reference_skew = stats.skew(reference_channel)
+            input_kurt = stats.kurtosis(input_channel)
+            reference_kurt = stats.kurtosis(reference_channel)
+
+            # Normalize input channel
+            normalized_input = (input_channel - input_mean) / input_std if input_std != 0 else np.zeros_like(input_channel)
+
+            # Scale and shift to match reference moments
+            if reference_std != 0:
+                matched_channel_values = (normalized_input * reference_std) + reference_mean
+            else:
+                matched_channel_values = np.full_like(input_channel, reference_mean)
+
+            # Attempt to match skew and kurtosis (more complex)
+            # This part is simplified and might not perfectly match skew and kurtosis
+            matched_channel_values = (matched_channel_values - np.mean(matched_channel_values)) / np.std(matched_channel_values)
+            matched_channel_values = (matched_channel_values * (reference_skew / input_skew if input_skew != 0 else 1)) + (
+                reference_kurt / input_kurt if input_kurt != 0 else 1
+            )
+
+            matched_channel_tensor = (
+                torch.from_numpy(matched_channel_values.reshape(input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]))
+                .float()
+                .to(dtype=input_latent.dtype, device=input_latent.device)
+            )
+            matched_latent[:, i, :, :] = matched_channel_tensor
+
+        return matched_latent
+
+    def _match_range(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+        """
+        Matches the minimum and maximum values of the input latent to the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over specified channels
+            input_channel = input_latent[:, i, :, :]
+            reference_channel = reference_latent[:, i, :, :]
+
+            input_min = torch.min(input_channel)
+            input_max = torch.max(input_channel)
+            reference_min = torch.min(reference_channel)
+            reference_max = torch.max(reference_channel)
+
+            if input_max == input_min:
+                matched_channel = torch.full_like(input_channel, reference_min)
+            elif reference_max == reference_min:
+                matched_channel = torch.full_like(input_channel, reference_min)
+            else:
+                # Scale and shift the input channel to match the reference range
+                scaled_channel = (input_channel - input_min) / (input_max - input_min)
+                matched_channel = scaled_channel * (reference_max - reference_min) + reference_min
+
+            matched_latent[:, i, :, :] = matched_channel
+
+        return matched_latent
+
+    def _match_std_dev_mean_range(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
+        """
+        Matches the standard deviation, mean, and range of the input latent to the reference latent.
+        """
+        matched_latent = torch.zeros_like(input_latent)
+        for i in channel_indices:  # Iterate over specified channels
+            input_channel = input_latent[:, i, :, :]
+            reference_channel = reference_latent[:, i, :, :]
+
+            # 1. Match std_dev and mean
+            input_std = torch.std(input_channel)
+            reference_std = torch.std(reference_channel)
+            reference_mean = torch.mean(reference_channel)
+
+            if input_std != 0:
+                scaled_channel = (input_channel / input_std) * reference_std
+            else:
+                scaled_channel = torch.zeros_like(input_channel)
+
+            shifted_channel = scaled_channel - torch.mean(scaled_channel) + reference_mean
+
+            # 2. Match range
+            input_min = torch.min(shifted_channel)
+            input_max = torch.max(shifted_channel)
+            reference_min = torch.min(reference_channel)
+            reference_max = torch.max(reference_channel)
+
+            if input_max == input_min:
+                matched_channel = torch.full_like(shifted_channel, reference_min.item())
+            elif reference_max == reference_min:
+                matched_channel = torch.full_like(shifted_channel, reference_min.item())
+            else:
+                scaled_range_channel = (shifted_channel - input_min) / (input_max - input_min)
+                matched_channel = scaled_range_channel * (reference_max - reference_min) + reference_min
+
+            matched_latent[:, i, :, :] = matched_channel
+
+        return matched_latent
