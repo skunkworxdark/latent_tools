@@ -9,10 +9,19 @@ Discord Link: [`latent_tools`](https://discord.com/channels/1020123559063990373/
 - `Latent Average` - adds both latents together and divides by 2 - Channels can be selected with all or a 0-based csv list
 - `Latent Combine` - Many more combination methods. Quite a few of these are AI generated so Not sure how useful they will be but might be interesting. + Channel Selection.
 - `Latent Plot` - generates a grid of histograms one per channel of the latent. Idea stolen from @dunkeroni previous posts. lots of options + Channel Selection.
-- `Latent channels to grid` - a grid of Gray-scale images that represent the channels in a latent.
+- `Latent Channels to Grid` - a grid of Gray-scale images that represent the channels in a latent.
 - `Latent Dtype Convert` -  convert a latent to Float61 Float32 or BFloat16
 - `Latent Modify` - allow scale and shift of latents channel vales.
 - `Latent Match` - MATCHING_METHODS  "histogram", "std_dev", "mean", "std_dev+mean", "cdf", "moment", "range", "std_dev+mean+range" + Channel Selection.
+- `Latent White Noise` -  Outputs white noise for Flux, SD3.5 or SD/SDXL
+- `Latent Low Pass filter` - apply a Low pass filter to a latent (brown noise ~0.05)
+- `Latent Band Pass filter` - apply a Band pass filter to a latent (green noise ~ 0.1-0.2)
+- `Latent High Pass filter` - apply a High pass filter to a latent (blue noise ~0.15)
+- `Latent Blend Linear` - Blend two latents in a linear fashion
+- `Latent Normalize Std-Dev` - Normalize a latent to a specified Std Dev
+- `Latent Normalize Range` - Normalize a latent to a specific Range
+- `Latent Normalize STD Dev and Range` -  imperatively attempts to normalize a latent to a Std-Dev and Range at the same time. 
+
 
 ## Usage
 

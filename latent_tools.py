@@ -2,11 +2,13 @@
 
 import io
 import math
-from typing import List, Literal
+from typing import List, Literal, Tuple
 
 import matplotlib
 import numpy as np
 import torch
+
+from invokeai.app.util.misc import SEED_MAX
 
 matplotlib.use("Agg")  # Use the Agg backend to prevent popup
 from matplotlib import pyplot as plt
@@ -72,7 +74,6 @@ class LatentAverageInvocation(BaseInvocation, WithMetadata, WithBoard):
     )
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
-        """Averages two latents"""
         latent_a = context.tensors.load(self.latentA.latents_name)
         latent_b = context.tensors.load(self.latentB.latents_name)
         assert latent_a.shape == latent_b.shape, "inputs must be same size"
@@ -117,7 +118,7 @@ BLEND_MODES = Literal[
     title="Latent Combine",
     tags=["latents", "combine"],
     category="latents",
-    version="1.1.0",
+    version="1.2.0",
 )
 class LatentCombineInvocation(BaseInvocation):
     """Combines two latent tensors using various methods"""
@@ -141,13 +142,13 @@ class LatentCombineInvocation(BaseInvocation):
         default=0.5,
         description="Weight for latent A",
         ge=0,
-        le=1,
+        le=2,
     )
     weight_b: float = InputField(
         default=0.5,
         description="Weight for latent B",
         ge=0,
-        le=1,
+        le=2,
     )
     scale_to_input_ranges: bool = InputField(default=False, description="Scale output to input ranges")
     channels: str = InputField(
@@ -237,7 +238,7 @@ class LatentCombineInvocation(BaseInvocation):
             blended_channel = blended_channel * (max_val - min_val) + min_val
 
             if self.scale_to_input_ranges:
-                blended_channel = self._normalize_latent(latent_a[:, i, :, :], latent_b[:, i, :, :], blended_channel)
+                blended_channel = self._normalize_latent_to_inputs(latent_a[:, i, :, :], latent_b[:, i, :, :], blended_channel)
 
             blended_latent[:, i, :, :] = blended_channel
 
@@ -262,7 +263,7 @@ class LatentCombineInvocation(BaseInvocation):
 
         return blended_latent
 
-    def _normalize_latent(self, latent_a: torch.Tensor, latent_b: torch.Tensor, latent_out: torch.Tensor) -> torch.Tensor:
+    def _normalize_latent_to_inputs(self, latent_a: torch.Tensor, latent_b: torch.Tensor, latent_out: torch.Tensor) -> torch.Tensor:
         """Normalizes the output latent to the range of the input latents."""
         min_val_in = min(torch.min(latent_a).item(), torch.min(latent_b).item())
         max_val_in = max(torch.max(latent_a).item(), torch.max(latent_b).item())
@@ -555,7 +556,6 @@ class LatentDtypeConvertInvocation(BaseInvocation):
     )
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
-        """Converts the dtype of a latent tensor."""
         latent = context.tensors.load(self.latent.latents_name)
 
         target_dtype = getattr(torch, self.dtype)
@@ -594,7 +594,6 @@ class LatentModifyChannelsInvocation(BaseInvocation):
     )
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
-        """Modifies selected channels of a latent tensor."""
         latent = context.tensors.load(self.latent.latents_name)
 
         if len(latent.shape) != 4:
@@ -613,6 +612,9 @@ class LatentModifyChannelsInvocation(BaseInvocation):
         return LatentsOutput.build(latents_name=name, latents=modified_latent, seed=None)
 
 
+# ---------------------------------------------------------------------
+# ----------------------------Match------------------------------------
+# ---------------------------------------------------------------------
 MATCHING_METHODS = Literal["histogram", "std_dev", "mean", "std_dev+mean", "cdf", "moment", "range", "std_dev+mean+range"]
 
 
@@ -649,10 +651,6 @@ class LatentMatchInvocation(BaseInvocation):
     )
 
     def invoke(self, context: InvocationContext) -> LatentsOutput:
-        """
-        Matches the distribution of the input latent to the reference latent
-        using the specified method.
-        """
         input_latent = context.tensors.load(self.input_latent.latents_name)
         reference_latent = context.tensors.load(self.reference_latent.latents_name)
 
@@ -945,3 +943,594 @@ class LatentMatchInvocation(BaseInvocation):
             matched_latent[:, i, :, :] = matched_channel
 
         return matched_latent
+
+
+# ---------------------------------------------------------------------
+# ----------------------------NOISE------------------------------------
+# ---------------------------------------------------------------------
+
+
+def generate_white_noise_gausian(
+    shape: Tuple[int, ...],
+    seed: int,
+) -> torch.Tensor:
+    # We always generate noise on the same device and dtype then cast to ensure consistency across devices/dtypes.
+    rand_device = "cpu"
+    rand_dtype = torch.float16
+
+    noise = torch.randn(
+        shape,
+        device=rand_device,
+        dtype=rand_dtype,
+        generator=torch.Generator(device=rand_device).manual_seed(seed),
+    )
+    return noise
+
+
+def generate_white_noise_uniform(
+    shape: Tuple[int, ...],
+    seed: int,
+) -> torch.Tensor:
+    # We always generate noise on the same device and dtype then cast to ensure consistency across devices/dtypes.
+    rand_device = "cpu"
+    rand_dtype = torch.float16
+
+    noise = torch.rand(
+        shape,
+        device=rand_device,
+        dtype=rand_dtype,
+        generator=torch.Generator(device=rand_device).manual_seed(seed),
+    )
+    return noise * 2 - 1
+
+
+def low_pass(
+    latent: torch.Tensor,
+    upper_freq: float,
+) -> torch.Tensor:
+    if len(latent.shape) != 4:
+        raise ValueError("Latent tensor must have 4 dimensions (batch, channels, height, width).")
+
+    height, width = latent.shape[-2:]
+    freq_rad = create_radial_frequency_grid(height, width, device=latent.device)
+
+    eps = torch.finfo(freq_rad.dtype).eps
+    filter = 1.0 / (freq_rad + eps)
+    filter[0, 0] = 0
+    upper_mask = (freq_rad <= upper_freq).float()
+    filter_mask = filter * upper_mask
+
+    low_latent = apply_frequency_filter(latent, filter_mask)
+
+    return low_latent.to(device=latent.device, dtype=latent.dtype)
+
+
+def high_pass(
+    latent: torch.Tensor,
+    upper_freq: float,
+) -> torch.Tensor:
+    if len(latent.shape) != 4:
+        raise ValueError("Latent tensor must have 4 dimensions (batch, channels, height, width).")
+
+    height, width = latent.shape[-2:]
+    freq_rad = create_radial_frequency_grid(height, width, device=latent.device)
+
+    filter_mask_generated = (freq_rad >= upper_freq).float()
+    filter_mask = freq_rad * filter_mask_generated
+
+    high_latent = apply_frequency_filter(latent, filter_mask)
+
+    return high_latent.to(device=latent.device, dtype=latent.dtype)
+
+
+def band_pass(
+    latent: torch.Tensor,
+    lower_freq: float,
+    upper_freq: float,
+) -> torch.Tensor:
+    if lower_freq >= upper_freq:
+        raise ValueError("Lower frequency must be less than upper frequency.")
+
+    if len(latent.shape) != 4:
+        raise ValueError("Latent tensor must have 4 dimensions (batch, channels, height, width).")
+
+    height, width = latent.shape[-2:]
+    freq_rad = create_radial_frequency_grid(height, width, device=latent.device)
+
+    filter_mask = ((freq_rad >= lower_freq) & (freq_rad <= upper_freq)).float()
+
+    band_latent = apply_frequency_filter(latent, filter_mask)
+
+    return band_latent.to(device=latent.device, dtype=latent.dtype)
+
+
+def create_radial_frequency_grid(height: int, width: int, device: torch.device) -> torch.Tensor:
+    freq_y = torch.fft.fftfreq(height, device=device).unsqueeze(-1)
+    freq_x = torch.fft.fftfreq(width, device=device).unsqueeze(0)
+    freq_rad = torch.sqrt(freq_y**2 + freq_x**2)
+    return freq_rad
+
+
+def apply_frequency_filter(latent: torch.Tensor, filter_mask: torch.Tensor) -> torch.Tensor:
+    batch, channels, height, width = latent.shape
+    filtered_noise = torch.zeros_like(latent, dtype=torch.float32)
+
+    fft_noise = torch.fft.fft2(latent.to(torch.complex64))
+    filter_mask_expanded = filter_mask.unsqueeze(0).unsqueeze(0)
+
+    for b in range(batch):
+        for c in range(channels):
+            fft_channel = fft_noise[b, c, :, :].unsqueeze(0).unsqueeze(0)
+            filtered_fft = fft_channel * filter_mask_expanded
+            filtered_noise[b, c, :, :] = torch.fft.ifft2(filtered_fft).real
+
+    return filtered_noise
+
+
+def normalize_tensor_range(tensor: torch.Tensor, min: float = -1.0, max: float = 1.0) -> torch.Tensor:
+    min_val = torch.min(tensor)
+    max_val = torch.max(tensor)
+    if max_val == min_val:
+        return torch.zeros_like(tensor)
+    normalized_tensor = min + ((tensor - min_val) / (max_val - min_val)) * (max - min)
+    return normalized_tensor
+
+
+def normalize_tensor_std_dev(tensor: torch.Tensor, std_dev: float) -> torch.Tensor:
+    mean = torch.mean(tensor)
+    std = torch.std(tensor)
+    if std == 0:
+        normalized_tensor = torch.full_like(tensor, mean.item())
+    else:
+        normalized_tensor = (tensor - mean) / std * std_dev
+    return normalized_tensor
+
+
+def normalize_iterative_dual(
+    tensor: torch.Tensor,
+    target_std: float,
+    min_target: float,
+    max_target: float,
+    max_iterations: int = 100,
+    tolerance: float = 1e-5,
+) -> torch.Tensor:
+    """
+    Normalizes a tensor to a specified standard deviation and range using an iterative approach.
+
+    Args:
+        tensor: The input PyTorch tensor.
+        target_std: The desired standard deviation for the output tensor.
+        min_target: The desired minimum value for the output tensor.
+        max_target: The desired maximum value for the output tensor.
+        max_iterations: The maximum number of iterations to perform.
+        tolerance: The tolerance level for the standard deviation and range.
+
+    Returns:
+        A new PyTorch tensor with approximately the specified standard deviation and range.
+    """
+    original_mean = torch.mean(tensor)
+    original_std = torch.std(tensor)
+    min = torch.min(tensor)
+    max = torch.max(tensor)
+    # Handle the case where all values in the tensor are the same
+    if max == min:
+        return torch.full_like(tensor, (min_target + max_target) / 2.0)
+
+    # Initialize search ranges for scale and shift
+    scale_low, scale_high = 0.01, 10.0  # Reasonable initial bounds for scale
+    shift_low, shift_high = -10.0, 10.0  # Reasonable initial bounds for shift
+
+    if original_std == 0:
+        return torch.full_like(tensor, (min_target + max_target) / 2.0)
+
+    # 1. Initialize Scale Range based on Target Std Dev
+    initial_scale = target_std / original_std
+    # Set a reasonable range around the initial scale (e.g., +/- 50%)
+    scale_low = initial_scale * 0.5
+    scale_high = initial_scale * 1.5
+    if scale_low == 0:
+        scale_low = 0.01  # Ensure lower bound is not zero
+
+    # 2. Initialize Shift Range based on Target Range and Scaled Mean
+    # Estimate the mean of the scaled tensor
+    estimated_scaled_mean = original_mean * initial_scale
+    # The midpoint of the target range
+    target_midpoint = (min_target + max_target) / 2
+    # Estimate the required shift
+    initial_shift = target_midpoint - estimated_scaled_mean
+    # Set a reasonable range around the initial shift (e.g., +/- the span of the target range)
+    shift_range = max_target - min_target
+    shift_low = initial_shift - shift_range
+    shift_high = initial_shift + shift_range
+
+    best_tensor = tensor.clone()
+    best_loss = float("inf")
+
+    for i in range(max_iterations):
+        mid_scale = (scale_low + scale_high) / 2
+        mid_shift = (shift_low + shift_high) / 2
+
+        scaled_shifted_tensor = (tensor - original_mean) * mid_scale + mid_shift
+
+        current_std = torch.std(scaled_shifted_tensor)
+        current_min = torch.min(scaled_shifted_tensor)
+        current_max = torch.max(scaled_shifted_tensor)
+
+        std_diff = current_std - target_std
+        min_diff = current_min - min_target
+        max_diff = current_max - max_target
+
+        loss = abs(std_diff) + abs(min_diff) + abs(max_diff)
+
+        if loss < best_loss:
+            best_loss = loss
+            best_tensor = scaled_shifted_tensor.clone()
+            if best_loss < tolerance:
+                break
+
+        # Adjust search ranges (more refined binary chop logic)
+        if std_diff > tolerance:
+            scale_high = mid_scale
+        elif std_diff < -tolerance:
+            scale_low = mid_scale
+        else:
+            # If std is close enough, we can narrow the range more aggressively
+            scale_low = mid_scale - (mid_scale - scale_low) * 0.5
+            scale_high = mid_scale + (scale_high - mid_scale) * 0.5
+
+        if min_diff > tolerance:
+            shift_high = mid_shift
+        elif min_diff < -tolerance:
+            shift_low = mid_shift
+        else:
+            shift_low = mid_shift - (mid_shift - shift_low) * 0.5
+            shift_high = mid_shift + (shift_high - mid_shift) * 0.5
+
+        if max_diff > tolerance:
+            shift_high = mid_shift
+        elif max_diff < -tolerance:
+            shift_low = mid_shift
+        else:
+            shift_low = mid_shift - (mid_shift - shift_low) * 0.5
+            shift_high = mid_shift + (shift_high - mid_shift) * 0.5
+
+    return best_tensor
+
+
+@invocation(
+    "latent_white_noise",
+    title="Latent White Noise",
+    tags=["latents", "noise", "white"],
+    category="latents",
+    version="1.1.0",
+)
+class LatentWhiteNoiseInvocation(BaseInvocation):
+    """Creates White Noise latent."""
+
+    width: int = InputField(default=512, description="Desired image width")
+    height: int = InputField(default=512, description="Desired image height")
+    latent_type: Literal["Flux", "SD3.5", "SD/SDXL"] = InputField(
+        default="Flux",
+        description="Latent Type",
+    )
+    noise_type: Literal["Uniform", "Gausian"] = InputField(
+        default="Gausian",
+        description="Noise Type (Uniform=random, Gausian=Normal distribution)",
+    )
+    seed: int = InputField(default=0, ge=0, le=SEED_MAX, description="Seed for noise generation")
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        if self.latent_type == "Flux":
+            channels = 16
+            height = 2 * math.ceil(self.height / 16)
+            width = 2 * math.ceil(self.width / 16)
+        elif self.latent_type == "SD3.5":
+            channels = 16
+            height = int(self.height) // 8
+            width = int(self.width) // 8
+        elif self.latent_type == "SD/SDXL":
+            channels = 4
+            height = int(self.height) // 8
+            width = int(self.width) // 8
+        else:
+            raise ValueError(f"Invalid latent type: {self.latent_type}")
+
+        shape = (1, channels, height, width)
+
+        if self.noise_type == "Uniform":
+            noise = generate_white_noise_uniform(shape, self.seed)
+        elif self.noise_type == "Gausian":
+            noise = generate_white_noise_gausian(shape, self.seed)
+        else:
+            raise ValueError(f"Invalid noise type: {self.noise_type}")
+
+        name = context.tensors.save(tensor=noise)
+        return LatentsOutput.build(latents_name=name, latents=noise, seed=self.seed)
+
+
+@invocation(
+    "latent_low_pass_filter",
+    title="Latent Low Pass Filter",
+    tags=["latents", "noise", "filter", "low pass"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentLowPassFilterInvocation(BaseInvocation):
+    """Latent Low Pass Filter"""
+
+    input_latent: LatentsField = InputField(
+        default=None,
+        description="Input latent",
+        input=Input.Connection,
+    )
+    upper_freq: float = InputField(default=0.05, description="upper frequency (0-0.5)")
+    normalize_std_dev: bool = InputField(default=False, description="normalize std dev to 1.0")
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        input_latent = context.tensors.load(self.input_latent.latents_name)
+
+        latent = low_pass(input_latent, self.upper_freq)
+
+        if self.normalize_std_dev:
+            latent = normalize_tensor_std_dev(latent, 1.0)
+
+        name = context.tensors.save(tensor=latent)
+        return LatentsOutput.build(latents_name=name, latents=latent, seed=None)
+
+
+@invocation(
+    "latent_high_pass_filter",
+    title="Latent High Pass Filter",
+    tags=["latents", "noise", "filter", "high pass"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentHighPassFilterInvocation(BaseInvocation):
+    """Latent High Pass Filter"""
+
+    input_latent: LatentsField = InputField(
+        default=None,
+        description="Input latent",
+        input=Input.Connection,
+    )
+    lower_freq: float = InputField(default=0.15, description="lower frequency (0-0.5)")
+    normalize_std_dev: bool = InputField(default=False, description="normalize std dev to 1.0")
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        input_latent = context.tensors.load(self.input_latent.latents_name)
+
+        latent = high_pass(input_latent, self.lower_freq)
+
+        if self.normalize_std_dev:
+            latent = normalize_tensor_std_dev(latent, 1.0)
+
+        name = context.tensors.save(tensor=latent)
+        return LatentsOutput.build(latents_name=name, latents=latent, seed=None)
+
+
+@invocation(
+    "latent_band_pass_filter",
+    title="Latent Band Pass Filter",
+    tags=["latents", "noise", "filter", "band pass"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentBandPassFilterInvocation(BaseInvocation):
+    """Latent Band Pass Filter"""
+
+    input_latent: LatentsField = InputField(
+        default=None,
+        description="Input latent",
+        input=Input.Connection,
+    )
+    lower_freq: float = InputField(default=0.1, ge=0, le=0.5, description="lower frequency (0-0.5)")
+    upper_freq: float = InputField(default=0.2, ge=0, le=0.5, description="upper frequency (0-0.5)")
+    normalize_std_dev: bool = InputField(default=False, description="normalize std dev to 1.0")
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        input_latent = context.tensors.load(self.input_latent.latents_name)
+
+        latent = band_pass(input_latent, self.lower_freq, self.upper_freq)
+
+        if self.normalize_std_dev:
+            latent = normalize_tensor_std_dev(latent, 1.0)
+
+        name = context.tensors.save(tensor=latent)
+        return LatentsOutput.build(latents_name=name, latents=latent, seed=None)
+
+
+@invocation(
+    "latent_blend_linear",
+    title="Latent Blend Linear",
+    tags=["latents"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentBlendLinearInvocation(BaseInvocation, WithMetadata, WithBoard):
+    """Blend two latents Linearly"""
+
+    latentA: LatentsField = InputField(
+        default=None,
+        description=FieldDescriptions.latents,
+        input=Input.Connection,
+    )
+    latentB: LatentsField = InputField(
+        default=None,
+        description=FieldDescriptions.latents,
+        input=Input.Connection,
+    )
+    a_b_ratio: float = InputField(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="Ratio of latentA to latentB (1=All A, 0=All B)",
+    )
+    channels: str = InputField(
+        default="all",
+        description="Comma-separated list of channel indices to average. Use 'all' for all channels.",
+    )
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        if not (0 <= self.a_b_ratio <= 1):
+            raise ValueError("The mixing ratio must be between 0 and 1.")
+
+        latent_a = context.tensors.load(self.latentA.latents_name)
+        latent_b = context.tensors.load(self.latentB.latents_name)
+        assert latent_a.shape == latent_b.shape, "inputs must be same size"
+
+        num_channels = latent_a.shape[1]
+        channel_indices = validate_channel_indices(self.channels, num_channels)
+
+        # Create a copy of latent_a to modify
+        blended_latent = latent_a.clone()
+        for i in channel_indices:
+            blended_latent[:, i, :, :] = (self.a_b_ratio * latent_a[:, i, :, :]) + ((1 - self.a_b_ratio) * latent_b[:, i, :, :])
+
+        name = context.tensors.save(tensor=blended_latent)
+        return LatentsOutput.build(latents_name=name, latents=blended_latent, seed=None)
+
+
+@invocation(
+    "latent_normalize_std_dev",
+    title="Latent Normalize Std-Dev",
+    tags=["latents"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentNormalizeStdDevInvocation(BaseInvocation, WithMetadata, WithBoard):
+    """Normalize a Latents Std Dev"""
+
+    latent: LatentsField = InputField(
+        default=None,
+        description=FieldDescriptions.latents,
+        input=Input.Connection,
+    )
+    std_dev: float = InputField(
+        default=1.0,
+        ge=0,
+        description="Standard deviation to normalize to",
+    )
+    channels: str = InputField(
+        default="all",
+        description="Comma-separated list of channel indices to average. Use 'all' for all channels.",
+    )
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        latent_in = context.tensors.load(self.latent.latents_name)
+        # Create a copy of latent_a to modify
+        latent = latent_in.clone()
+        num_channels = latent.shape[1]
+        channel_indices = validate_channel_indices(self.channels, num_channels)
+
+        for i in channel_indices:
+            latent[:, i, :, :] = normalize_tensor_std_dev(latent[:, i, :, :], self.std_dev)
+
+        name = context.tensors.save(tensor=latent)
+        return LatentsOutput.build(latents_name=name, latents=latent, seed=None)
+
+
+@invocation(
+    "latent_normalize_range",
+    title="Latent Normalize Range",
+    tags=["latents"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentNormalizeRangeInvocation(BaseInvocation, WithMetadata, WithBoard):
+    """Normalize a Latents Range"""
+
+    latent: LatentsField = InputField(
+        default=None,
+        description=FieldDescriptions.latents,
+        input=Input.Connection,
+    )
+    min: float = InputField(
+        default=-1.0,
+        description="Min for new range",
+    )
+    max: float = InputField(
+        default=1.0,
+        description="Max for new range",
+    )
+    channels: str = InputField(
+        default="all",
+        description="Comma-separated list of channel indices to average. Use 'all' for all channels.",
+    )
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        if self.min >= self.max:
+            raise ValueError("Min must be less than Max")
+
+        latent_in = context.tensors.load(self.latent.latents_name)
+        # Create a copy of latent_a to modify
+        latent = latent_in.clone()
+        num_channels = latent.shape[1]
+        channel_indices = validate_channel_indices(self.channels, num_channels)
+
+        for i in channel_indices:
+            latent[:, i, :, :] = normalize_tensor_range(latent[:, i, :, :], self.min, self.max)
+
+        name = context.tensors.save(tensor=latent)
+        return LatentsOutput.build(latents_name=name, latents=latent, seed=None)
+
+
+@invocation(
+    "latent_normalize_std_dev_range",
+    title="Latent Normalize STD Dev and Range",
+    tags=["latents"],
+    category="latents",
+    version="1.0.0",
+)
+class LatentNormalizeStdRangeInvocation(BaseInvocation, WithMetadata, WithBoard):
+    """Normalize a Latents Range and Std Dev"""
+
+    latent: LatentsField = InputField(
+        default=None,
+        description=FieldDescriptions.latents,
+        input=Input.Connection,
+    )
+    std_dev: float = InputField(
+        default=1.0,
+        ge=0,
+        description="Standard deviation to normalize to",
+    )
+    min: float = InputField(
+        default=-1.0,
+        description="Min for new range",
+    )
+    max: float = InputField(
+        default=1.0,
+        description="Max for new range",
+    )
+    tolerance: float = InputField(
+        default=0.001,
+        gt=0,
+        description="tolerance",
+    )
+    max_iterations: int = InputField(
+        default=10,
+        gt=0,
+        description="Max iterations",
+    )
+    channels: str = InputField(
+        default="all",
+        description="Comma-separated list of channel indices to average. Use 'all' for all channels.",
+    )
+
+    def invoke(self, context: InvocationContext) -> LatentsOutput:
+        if self.min >= self.max:
+            raise ValueError("Min must be less than Max")
+
+        latent_in = context.tensors.load(self.latent.latents_name)
+        # Create a copy of latent_a to modify
+        latent = latent_in.clone()
+        num_channels = latent.shape[1]
+        channel_indices = validate_channel_indices(self.channels, num_channels)
+
+        for i in channel_indices:
+            latent[:, i, :, :] = normalize_iterative_dual(
+                latent[:, i, :, :], self.std_dev, self.min, self.max, self.max_iterations, self.tolerance
+            )
+
+        name = context.tensors.save(tensor=latent)
+        return LatentsOutput.build(latents_name=name, latents=latent, seed=None)
