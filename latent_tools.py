@@ -7,6 +7,7 @@ from typing import List, Literal, Tuple
 import matplotlib
 import numpy as np
 import torch
+from PIL import ImageDraw, ImageFont
 
 from invokeai.app.util.misc import SEED_MAX
 
@@ -459,7 +460,7 @@ BIT_DEPTH_OPTIONS = Literal["8", "16"]
     title="Latent Channels to Grid",
     tags=["latents", "image", "flux"],
     category="latents",
-    version="1.1.0",
+    version="1.2.0",
 )
 class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Generates a scaled grid Images from latent channels"""
@@ -472,6 +473,7 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
     scale: float = InputField(default=1.0, description="Overall scale factor for the grid.")
     normalize_channels: bool = InputField(default=False, description="Normalize all channels using a common min/max range.")
     output_bit_depth: BIT_DEPTH_OPTIONS = InputField(default="8", description="Output as 8-bit or 16-bit grayscale.")
+    title: str = InputField(default="Latent Channel Grid", description="Title to display on the image")
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
         latent = context.tensors.load(self.latent.latents_name)
@@ -519,14 +521,22 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
             channel_images.append(channel_image)
 
         grid_width = grid_size * scaled_width
-        grid_height = grid_size * scaled_height
+        # Add space for the title if provided
+        title_height = 30 if self.title else 0
+        grid_height = grid_size * scaled_height + title_height
 
-        grid_image = Image.new(pil_mode, (grid_width, grid_height))
+        grid_image = Image.new(pil_mode, (grid_width, grid_height), color=0)
 
         for i, channel_image in enumerate(channel_images):
             row = i // grid_size
             col = i % grid_size
             grid_image.paste(channel_image, (col * scaled_width, row * scaled_height))
+
+        # Add title if provided
+        if self.title:
+            draw = ImageDraw.Draw(grid_image)
+            font = ImageFont.load_default()
+            draw.text((10, grid_height - title_height + 10), self.title, font=font, fill=255)
 
         image_dto = context.images.save(image=grid_image)
         return ImageOutput.build(image_dto)
