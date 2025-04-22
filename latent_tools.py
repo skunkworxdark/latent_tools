@@ -220,11 +220,15 @@ class LatentCombineInvocation(BaseInvocation):
                 )
             elif self.method == "color_dodge":
                 blended_channel = torch.where(
-                    normalized_b == 1, torch.ones_like(normalized_a), torch.clamp(normalized_a / (1 - normalized_b), 0, 1)
+                    normalized_b == 1,
+                    torch.ones_like(normalized_a),
+                    torch.clamp(normalized_a / (1 - normalized_b), 0, 1),
                 )
             elif self.method == "color_burn":
                 blended_channel = torch.where(
-                    normalized_b == 0, torch.zeros_like(normalized_a), torch.clamp(1 - (1 - normalized_a) / normalized_b, 0, 1)
+                    normalized_b == 0,
+                    torch.zeros_like(normalized_a),
+                    torch.clamp(1 - (1 - normalized_a) / normalized_b, 0, 1),
                 )
             elif self.method == "linear_dodge":
                 blended_channel = torch.clamp(normalized_a + normalized_b, 0, 1)
@@ -239,7 +243,9 @@ class LatentCombineInvocation(BaseInvocation):
             blended_channel = blended_channel * (max_val - min_val) + min_val
 
             if self.scale_to_input_ranges:
-                blended_channel = self._normalize_latent_to_inputs(latent_a[:, i, :, :], latent_b[:, i, :, :], blended_channel)
+                blended_channel = self._normalize_latent_to_inputs(
+                    latent_a[:, i, :, :], latent_b[:, i, :, :], blended_channel
+                )
 
             blended_latent[:, i, :, :] = blended_channel
 
@@ -264,7 +270,9 @@ class LatentCombineInvocation(BaseInvocation):
 
         return blended_latent
 
-    def _normalize_latent_to_inputs(self, latent_a: torch.Tensor, latent_b: torch.Tensor, latent_out: torch.Tensor) -> torch.Tensor:
+    def _normalize_latent_to_inputs(
+        self, latent_a: torch.Tensor, latent_b: torch.Tensor, latent_out: torch.Tensor
+    ) -> torch.Tensor:
         """Normalizes the output latent to the range of the input latents."""
         min_val_in = min(torch.min(latent_a).item(), torch.min(latent_b).item())
         max_val_in = max(torch.max(latent_a).item(), torch.max(latent_b).item())
@@ -277,7 +285,9 @@ class LatentCombineInvocation(BaseInvocation):
         elif max_val_out == min_val_out:
             normalized_channel = torch.full_like(latent_out, min_val_in)
         else:
-            normalized_channel = (latent_out - min_val_out) / (max_val_out - min_val_out) * (max_val_in - min_val_in) + min_val_in
+            normalized_channel = (latent_out - min_val_out) / (max_val_out - min_val_out) * (
+                max_val_in - min_val_in
+            ) + min_val_in
 
         return normalized_channel
 
@@ -333,7 +343,9 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
             rows = (num_channels_to_plot + grid_size - 1) // grid_size
             cols = grid_size
 
-        fig_plot, axes_plot = plt.subplots(rows, cols, figsize=(cols * self.cell_x_multiplier, rows * self.cell_y_multiplier))
+        fig_plot, axes_plot = plt.subplots(
+            rows, cols, figsize=(cols * self.cell_x_multiplier, rows * self.cell_y_multiplier)
+        )
 
         # Flatten the axes array for easier iteration
         if num_channels_to_plot == 1:
@@ -460,7 +472,7 @@ BIT_DEPTH_OPTIONS = Literal["8", "16"]
     title="Latent Channels to Grid",
     tags=["latents", "image", "flux"],
     category="latents",
-    version="1.2.0",
+    version="1.2.1",
 )
 class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Generates a scaled grid Images from latent channels"""
@@ -471,7 +483,9 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
         input=Input.Connection,
     )
     scale: float = InputField(default=1.0, description="Overall scale factor for the grid.")
-    normalize_channels: bool = InputField(default=False, description="Normalize all channels using a common min/max range.")
+    normalize_channels: bool = InputField(
+        default=False, description="Normalize all channels using a common min/max range."
+    )
     output_bit_depth: BIT_DEPTH_OPTIONS = InputField(default="8", description="Output as 8-bit or 16-bit grayscale.")
     title: str = InputField(default="Latent Channel Grid", description="Title to display on the image")
 
@@ -501,12 +515,12 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
             target_max_val = 65535
             pil_dtype = np.uint16
             pil_mode = "I;16"
-            # pil_new_mode = "I"  # Image.new needs "I" for 32-bit int, then we can treat as 16-bit
+            pil_new_mode = "I"  # Image.new needs "I" for 32-bit int, then we can treat as 16-bit
         else:  # Default to 8-bit
             target_max_val = 255
             pil_dtype = np.uint8
             pil_mode = "L"
-            # pil_new_mode = "L"
+            pil_new_mode = "L"
 
         channel_images = []
         for channel in channels:
@@ -514,9 +528,9 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
             max_val = global_max if self.normalize_channels else np.max(channel)
 
             normalized_channel = (channel - min_val) / (max_val - min_val)
-            channel_image = Image.fromarray((normalized_channel * target_max_val).astype(pil_dtype), mode=pil_mode).resize(
-                (scaled_width, scaled_height), resample=Image.NEAREST
-            )
+            channel_image = Image.fromarray(
+                (normalized_channel * target_max_val).astype(pil_dtype), mode=pil_mode
+            ).resize((scaled_width, scaled_height), resample=Image.NEAREST)
 
             channel_images.append(channel_image)
 
@@ -525,7 +539,7 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
         title_height = 30 if self.title else 0
         grid_height = grid_size * scaled_height + title_height
 
-        grid_image = Image.new(pil_mode, (grid_width, grid_height), color=0)
+        grid_image = Image.new(pil_new_mode, (grid_width, grid_height), color=0)
 
         for i, channel_image in enumerate(channel_images):
             row = i // grid_size
@@ -536,7 +550,7 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
         if self.title:
             draw = ImageDraw.Draw(grid_image)
             font = ImageFont.load_default()
-            draw.text((10, grid_height - title_height + 10), self.title, font=font, fill=255)
+            draw.text((10, grid_height - title_height + 10), self.title, font=font, fill=target_max_val)
 
         image_dto = context.images.save(image=grid_image)
         return ImageOutput.build(image_dto)
@@ -625,7 +639,9 @@ class LatentModifyChannelsInvocation(BaseInvocation):
 # ---------------------------------------------------------------------
 # ----------------------------Match------------------------------------
 # ---------------------------------------------------------------------
-MATCHING_METHODS = Literal["histogram", "std_dev", "mean", "std_dev+mean", "cdf", "moment", "range", "std_dev+mean+range"]
+MATCHING_METHODS = Literal[
+    "histogram", "std_dev", "mean", "std_dev+mean", "cdf", "moment", "range", "std_dev+mean+range"
+]
 
 
 @invocation(
@@ -692,7 +708,9 @@ class LatentMatchInvocation(BaseInvocation):
         name = context.tensors.save(tensor=matched_latent)
         return LatentsOutput.build(latents_name=name, latents=matched_latent, seed=None)
 
-    def _histogram_match(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+    def _histogram_match(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
         """
         Matches the histogram of the input latent to the reference latent.
 
@@ -727,7 +745,11 @@ class LatentMatchInvocation(BaseInvocation):
             # Apply the interpolation to the input channel
             matched_channel_values = np.interp(input_channel, input_bins[:-1], interp_values)
             matched_channel_tensor = (
-                torch.from_numpy(matched_channel_values.reshape(input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]))
+                torch.from_numpy(
+                    matched_channel_values.reshape(
+                        input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]
+                    )
+                )
                 .float()
                 .to(dtype=input_latent.dtype, device=input_latent.device)
             )
@@ -735,7 +757,9 @@ class LatentMatchInvocation(BaseInvocation):
 
         return matched_latent
 
-    def _match_std_dev(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+    def _match_std_dev(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
         """
         Matches the standard deviation of the input latent to the reference latent.
 
@@ -764,7 +788,9 @@ class LatentMatchInvocation(BaseInvocation):
 
         return matched_latent
 
-    def _match_mean(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+    def _match_mean(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
         """
         Matches the mean of the input latent to the reference latent.
         """
@@ -783,7 +809,9 @@ class LatentMatchInvocation(BaseInvocation):
 
         return matched_latent
 
-    def _match_std_dev_mean(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+    def _match_std_dev_mean(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
         """
         Matches the standard deviation and mean of the input latent to the reference latent.
         """
@@ -809,7 +837,9 @@ class LatentMatchInvocation(BaseInvocation):
 
         return matched_latent
 
-    def _match_cdf(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+    def _match_cdf(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
         """
         Matches the cumulative distribution function (CDF) of the input latent to the reference latent.
         """
@@ -832,7 +862,11 @@ class LatentMatchInvocation(BaseInvocation):
             # Apply the interpolation to the input channel
             matched_channel_values = np.interp(input_channel, input_sorted, interp_values)
             matched_channel_tensor = (
-                torch.from_numpy(matched_channel_values.reshape(input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]))
+                torch.from_numpy(
+                    matched_channel_values.reshape(
+                        input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]
+                    )
+                )
                 .float()
                 .to(dtype=input_latent.dtype, device=input_latent.device)
             )
@@ -840,7 +874,9 @@ class LatentMatchInvocation(BaseInvocation):
 
         return matched_latent
 
-    def _match_moment(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+    def _match_moment(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
         """
         Matches the mean, standard deviation, skewness, and kurtosis of the input latent to the reference latent.
         """
@@ -860,7 +896,9 @@ class LatentMatchInvocation(BaseInvocation):
             reference_kurt = stats.kurtosis(reference_channel)
 
             # Normalize input channel
-            normalized_input = (input_channel - input_mean) / input_std if input_std != 0 else np.zeros_like(input_channel)
+            normalized_input = (
+                (input_channel - input_mean) / input_std if input_std != 0 else np.zeros_like(input_channel)
+            )
 
             # Scale and shift to match reference moments
             if reference_std != 0:
@@ -870,13 +908,19 @@ class LatentMatchInvocation(BaseInvocation):
 
             # Attempt to match skew and kurtosis (more complex)
             # This part is simplified and might not perfectly match skew and kurtosis
-            matched_channel_values = (matched_channel_values - np.mean(matched_channel_values)) / np.std(matched_channel_values)
-            matched_channel_values = (matched_channel_values * (reference_skew / input_skew if input_skew != 0 else 1)) + (
-                reference_kurt / input_kurt if input_kurt != 0 else 1
+            matched_channel_values = (matched_channel_values - np.mean(matched_channel_values)) / np.std(
+                matched_channel_values
             )
+            matched_channel_values = (
+                matched_channel_values * (reference_skew / input_skew if input_skew != 0 else 1)
+            ) + (reference_kurt / input_kurt if input_kurt != 0 else 1)
 
             matched_channel_tensor = (
-                torch.from_numpy(matched_channel_values.reshape(input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]))
+                torch.from_numpy(
+                    matched_channel_values.reshape(
+                        input_latent.shape[0], 1, input_latent.shape[2], input_latent.shape[3]
+                    )
+                )
                 .float()
                 .to(dtype=input_latent.dtype, device=input_latent.device)
             )
@@ -884,7 +928,9 @@ class LatentMatchInvocation(BaseInvocation):
 
         return matched_latent
 
-    def _match_range(self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]) -> torch.Tensor:
+    def _match_range(
+        self, input_latent: torch.Tensor, reference_latent: torch.Tensor, channel_indices: List[int]
+    ) -> torch.Tensor:
         """
         Matches the minimum and maximum values of the input latent to the reference latent.
         """
@@ -1394,7 +1440,9 @@ class LatentBlendLinearInvocation(BaseInvocation, WithMetadata, WithBoard):
         # Create a copy of latent_a to modify
         blended_latent = latent_a.clone()
         for i in channel_indices:
-            blended_latent[:, i, :, :] = (self.a_b_ratio * latent_a[:, i, :, :]) + ((1 - self.a_b_ratio) * latent_b[:, i, :, :])
+            blended_latent[:, i, :, :] = (self.a_b_ratio * latent_a[:, i, :, :]) + (
+                (1 - self.a_b_ratio) * latent_b[:, i, :, :]
+            )
 
         name = context.tensors.save(tensor=blended_latent)
         return LatentsOutput.build(latents_name=name, latents=blended_latent, seed=None)
