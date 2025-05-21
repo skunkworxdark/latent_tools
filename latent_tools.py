@@ -20,7 +20,8 @@ from scipy import stats
 from invokeai.invocation_api import (
     BaseInvocation,
     FieldDescriptions,
-    ImageOutput,
+    ImageCollectionOutput,
+    ImageField,
     Input,
     InputField,
     InvocationContext,
@@ -60,12 +61,10 @@ class LatentAverageInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Average two latents"""
 
     latentA: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
     latentB: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -125,12 +124,10 @@ class LatentCombineInvocation(BaseInvocation):
     """Combines two latent tensors using various methods"""
 
     latentA: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
     latentB: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -297,13 +294,14 @@ class LatentCombineInvocation(BaseInvocation):
     title="Latent Plot",
     tags=["latents", "image", "flux"],
     category="latents",
-    version="1.4.0",
+    version="1.5.0",
 )
 class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Generates plots from latent channels and display in a grid."""
 
+    disable: bool = InputField(default=False, description="Disable this node")
+
     latent: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -321,7 +319,10 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
     )
     common_axis: bool = InputField(default=False, description="Use a common axis scales for all plots")
 
-    def invoke(self, context: InvocationContext) -> ImageOutput:
+    def invoke(self, context: InvocationContext) -> ImageCollectionOutput:
+        if self.disable:
+            return ImageCollectionOutput(collection=[])
+
         latent = context.tensors.load(self.latent.latents_name)
 
         if len(latent.shape) != 4:
@@ -461,7 +462,9 @@ class LatentPlotInvocation(BaseInvocation, WithMetadata, WithBoard):
         plt.close(fig_plot)
 
         image_dto = context.images.save(image=hist_image)
-        return ImageOutput.build(image_dto)
+        images: list[ImageField] = []
+        images.append(ImageField(image_name=image_dto.image_name))
+        return ImageCollectionOutput(collection=images)
 
 
 BIT_DEPTH_OPTIONS = Literal["8", "16"]
@@ -472,13 +475,14 @@ BIT_DEPTH_OPTIONS = Literal["8", "16"]
     title="Latent Channels to Grid",
     tags=["latents", "image", "flux"],
     category="latents",
-    version="1.2.1",
+    version="1.3.0",
 )
 class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Generates a scaled grid Images from latent channels"""
 
+    disable: bool = InputField(default=False, description="Disable this node")
+
     latent: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -489,7 +493,10 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
     output_bit_depth: BIT_DEPTH_OPTIONS = InputField(default="8", description="Output as 8-bit or 16-bit grayscale.")
     title: str = InputField(default="Latent Channel Grid", description="Title to display on the image")
 
-    def invoke(self, context: InvocationContext) -> ImageOutput:
+    def invoke(self, context: InvocationContext) -> ImageCollectionOutput:
+        if self.disable:
+            return ImageCollectionOutput(collection=[])
+
         latent = context.tensors.load(self.latent.latents_name)
 
         if len(latent.shape) != 4:
@@ -553,7 +560,9 @@ class LatentChannelsToGridInvocation(BaseInvocation, WithMetadata, WithBoard):
             draw.text((10, grid_height - title_height + 10), self.title, font=font, fill=target_max_val)
 
         image_dto = context.images.save(image=grid_image)
-        return ImageOutput.build(image_dto)
+        images: list[ImageField] = []
+        images.append(ImageField(image_name=image_dto.image_name))
+        return ImageCollectionOutput(collection=images)
 
 
 CONVERT_DTYPE_OPTIONS = Literal["float32", "float16", "bfloat16"]
@@ -570,7 +579,6 @@ class LatentDtypeConvertInvocation(BaseInvocation):
     """Converts the dtype of a latent tensor."""
 
     latent: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -600,7 +608,6 @@ class LatentModifyChannelsInvocation(BaseInvocation):
     """Modifies selected channels of a latent tensor using scale and shift."""
 
     latent: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -658,12 +665,10 @@ class LatentMatchInvocation(BaseInvocation):
     """
 
     input_latent: LatentsField = InputField(
-        default=None,
         description="The input latent tensor to be matched.",
         input=Input.Connection,
     )
     reference_latent: LatentsField = InputField(
-        default=None,
         description="The reference latent tensor to match against.",
         input=Input.Connection,
     )
@@ -1315,7 +1320,6 @@ class LatentLowPassFilterInvocation(BaseInvocation):
     """Latent Low Pass Filter"""
 
     input_latent: LatentsField = InputField(
-        default=None,
         description="Input latent",
         input=Input.Connection,
     )
@@ -1345,7 +1349,6 @@ class LatentHighPassFilterInvocation(BaseInvocation):
     """Latent High Pass Filter"""
 
     input_latent: LatentsField = InputField(
-        default=None,
         description="Input latent",
         input=Input.Connection,
     )
@@ -1375,7 +1378,6 @@ class LatentBandPassFilterInvocation(BaseInvocation):
     """Latent Band Pass Filter"""
 
     input_latent: LatentsField = InputField(
-        default=None,
         description="Input latent",
         input=Input.Connection,
     )
@@ -1406,12 +1408,10 @@ class LatentBlendLinearInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Blend two latents Linearly"""
 
     latentA: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
     latentB: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -1459,7 +1459,6 @@ class LatentNormalizeStdDevInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Normalize a Latents Std Dev"""
 
     latent: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -1498,7 +1497,6 @@ class LatentNormalizeRangeInvocation(BaseInvocation, WithMetadata, WithBoard):
     """Normalize a Latents Range"""
 
     latent: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
@@ -1543,7 +1541,6 @@ class LatentNormalizeStdRangeInvocation(BaseInvocation, WithMetadata, WithBoard)
     """Normalize a Latents Range and Std Dev"""
 
     latent: LatentsField = InputField(
-        default=None,
         description=FieldDescriptions.latents,
         input=Input.Connection,
     )
